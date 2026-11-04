@@ -79,6 +79,12 @@ async function fetchCommissionRate(env) {
   }
 }
 
+function connectPage(){
+  const nonce=Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,"0")).join("");
+  const html=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>바이낸스 수수료 연결 테스트</title><style nonce="${nonce}">body{margin:0;background:#0b1728;color:white;font:16px -apple-system,sans-serif;padding:20px}main{max-width:480px;margin:auto;background:#192b45;border-radius:14px;padding:18px}p{color:#c5d5e8;line-height:1.6}label{display:block;margin:18px 0 7px}input{box-sizing:border-box;width:100%;padding:13px;background:#091625;color:white;border:1px solid #89a2c2;border-radius:9px;font-size:16px}button{margin-top:12px;width:100%;padding:13px;background:#2569bb;color:white;border:0;border-radius:9px;font-size:16px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#091625;border-radius:9px;padding:14px}.note{font-size:12px}</style></head><body><main><h3>바이낸스 수수료 연결 테스트</h3><p>BTCUSDT 선물 수수료 조회만 실행해요. 실제 주문은 실행하지 않아요.</p><label for="token">APP_AUTH_TOKEN</label><input id="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Cloudflare에 등록한 인증 토큰"><button id="run">수수료율 조회하기</button><pre id="result" aria-live="polite">아직 조회하지 않았어요.</pre><p class="note">바이낸스 API Key나 Secret Key는 여기에 넣지 마세요. 토큰도 URL·GitHub·채팅에 올리지 마세요. 이 페이지는 토큰을 저장하지 않아요.</p></main><script nonce="${nonce}" src="/connect-script"></script></body></html>`;
+  return new Response(html,{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer","Content-Security-Policy":"default-src 'none'; script-src 'nonce-"+nonce+"' 'self'; style-src 'nonce-"+nonce+"'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"}});
+}
+const connectScript=`document.getElementById('run').onclick=async function(){const b=this,i=document.getElementById('token'),o=document.getElementById('result'),token=i.value.trim();if(!token){o.textContent='인증 토큰을 입력해 주세요.';return}b.disabled=true;o.textContent='조회 중…';try{const r=await fetch('/private/commission-rate',{headers:{Authorization:'Bearer '+token},cache:'no-store',credentials:'omit'});const d=await r.json();o.textContent=r.ok?'✅ 조회 성공!\\n지정가 메이커: '+d.makerPercent+'%\\n시장가 테이커: '+d.takerPercent+'%\\n실거래: 비활성화':'조회 실패: HTTP '+r.status+(d.code?' / '+d.code:'')}catch(e){o.textContent='연결 실패. 네트워크를 확인해 주세요.'}finally{i.value='';b.disabled=false}};`;
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
@@ -86,6 +92,8 @@ export default {
       return json({ error: "Method not allowed" }, 405);
     }
 
+    if (pathname === "/connect") return connectPage();
+    if (pathname === "/connect-script") return new Response(connectScript,{headers:{"Content-Type":"application/javascript; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
     // Public health check contains no account information or credentials.
     if (pathname === "/health") {
       return json({
