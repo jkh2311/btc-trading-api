@@ -10,6 +10,23 @@ const RESPONSE_HEADERS = {
   "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"
 };
 
+
+// Only the known public paper app can call the credential-in-memory route.
+// Token MUST accompany every request; no tokens/keys stored or logged.
+const APP_ORIGIN = "https://jkh2311.github.io";
+function corsHeaders(origin) {
+  return origin === APP_ORIGIN ? {
+    "Access-Control-Allow-Origin": APP_ORIGIN,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Max-Age": "600",
+    "Vary": "Origin"
+  } : {};
+}
+function corsJson(data, status = 200, extra = {}) {
+  return new Response(JSON.stringify(data), {status, headers:{...RESPONSE_HEADERS,...extra}});
+}
+
 function json(payload, status = 200) {
   return new Response(JSON.stringify(payload), { status, headers: RESPONSE_HEADERS });
 }
@@ -29,9 +46,11 @@ async function validToken(provided, expected) {
 
 // Read-only signed Binance USDⓈ-M futures API request.
 // Never log, return, or persist API credentials or signed URLs.
-async function fetchCommissionRate(env) {
-  if (!env.BINANCE_API_KEY || !env.BINANCE_API_SECRET) {
-    return json({ error: "Binance API secrets not configured", code: "BINANCE_NOT_CONFIGURED" }, 503);
+async function fetchCommissionRate(env, oneTimeCredentials = null, extraHeaders = {}) {
+  const apiKey = oneTimeCredentials ? oneTimeCredentials.apiKey : env.BINANCE_API_KEY;
+  const apiSecret = oneTimeCredentials ? oneTimeCredentials.apiSecret : env.BINANCE_API_SECRET;
+  if (!apiKey || !apiSecret) {
+    return corsJson({ error: "Binance API secrets not configured", code: "BINANCE_NOT_CONFIGURED" }, 503, extraHeaders);
   }
   const params = new URLSearchParams({
     symbol: "BTCUSDT",
@@ -39,7 +58,7 @@ async function fetchCommissionRate(env) {
     timestamp: String(Date.now())
   });
   const key = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(env.BINANCE_API_SECRET),
+    "raw", new TextEncoder().encode(apiSecret),
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
   );
   const signatureBytes = new Uint8Array(await crypto.subtle.sign(
@@ -50,21 +69,21 @@ async function fetchCommissionRate(env) {
   try {
     const response = await fetch("https://fapi.binance.com/fapi/v1/commissionRate?" + params.toString(), {
       method: "GET",
-      headers: { "X-MBX-APIKEY": env.BINANCE_API_KEY },
+      headers: { "X-MBX-APIKEY": apiKey },
       redirect: "manual",
       signal: AbortSignal.timeout(8000)
     });
     // Do not reflect arbitrary upstream messages or headers to callers.
     if (!response.ok) {
-      return json({ error: "Binance commission lookup failed", code: "BINANCE_LOOKUP_FAILED", upstreamStatus: response.status }, 502);
+      return corsJson({ error: "Binance commission lookup failed", code: "BINANCE_LOOKUP_FAILED", upstreamStatus: response.status }, 502, extraHeaders);
     }
     const data = await response.json();
     const maker = Number(data.makerCommissionRate);
     const taker = Number(data.takerCommissionRate);
     if (data.symbol !== "BTCUSDT" || !Number.isFinite(maker) || !Number.isFinite(taker) || maker < 0 || taker < 0 || maker > 1 || taker > 1) {
-      return json({ error: "Unexpected Binance response", code: "BINANCE_BAD_RESPONSE" }, 502);
+      return corsJson({ error: "Unexpected Binance response", code: "BINANCE_BAD_RESPONSE" }, 502, extraHeaders);
     }
-    return json({
+    return corsJson({
       symbol: "BTCUSDT",
       market: "USD-M Futures",
       makerCommissionRate: maker,
@@ -73,9 +92,9 @@ async function fetchCommissionRate(env) {
       takerPercent: Number((taker * 100).toFixed(6)),
       liveTradingEnabled: false,
       retrievedAt: new Date().toISOString()
-    });
+    }, 200, extraHeaders);
   } catch (_) {
-    return json({ error: "Binance commission lookup unavailable", code: "BINANCE_UNAVAILABLE" }, 502);
+    return corsJson({ error: "Binance commission lookup unavailable", code: "BINANCE_UNAVAILABLE" }, 502, extraHeaders);
   }
 }
 
@@ -109,6 +128,26 @@ const connectScript=`async function explainFailure(r,d,token){let out='조회 �
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
+    const origin = request.headers.get("Origin") || "";
+    if (pathname === "/private/commission-with-keys" && request.method === "OPTIONS") {
+      if (origin !== APP_ORIGIN) return json({error:"Forbidden"},403);
+      return new Response(null,{status:204,headers:corsHeaders(origin)});
+    }
+    if (pathname === "/private/commission-with-keys" && request.method === "POST") {
+      const h = corsHeaders(origin);
+      if (origin !== APP_ORIGIN) return json({error:"Forbidden"},403);
+      if (!env.APP_AUTH_TOKEN || env.APP_AUTH_TOKEN.length < 32) return corsJson({error:"Authentication not configured"},503,h);
+      const auth = request.headers.get("Authorization") || "";
+      const match = /^Bearer ([A-Za-z0-9._~+/=-]+)$/.exec(auth);
+      if (!match || !(await validToken(match[1],env.APP_AUTH_TOKEN))) return corsJson({error:"Unauthorized"},401,h);
+      if (!(request.headers.get("Content-Type")||"").toLowerCase().startsWith("application/json")) return corsJson({error:"Unsupported media type"},415,h);
+      if (Number(request.headers.get("Content-Length")||0)>4096) return corsJson({error:"Request too large"},413,h);
+      let input;
+      try { input=await request.json(); } catch (_) { return corsJson({error:"Invalid JSON"},400,h); }
+      const apiKey=input?.apiKey,apiSecret=input?.apiSecret;
+      if(typeof apiKey!=="string"||typeof apiSecret!=="string"||apiKey.length<10||apiKey.length>256||apiSecret.length<10||apiSecret.length>256) return corsJson({error:"Invalid API key fields"},400,h);
+      return fetchCommissionRate(env,{apiKey,apiSecret},h);
+    }
     if (request.method !== "GET") {
       return json({ error: "Method not allowed" }, 405);
     }
