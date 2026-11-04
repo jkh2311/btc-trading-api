@@ -51,7 +51,7 @@ async function fetchCommissionRate(env) {
     const response = await fetch("https://fapi.binance.com/fapi/v1/commissionRate?" + params.toString(), {
       method: "GET",
       headers: { "X-MBX-APIKEY": env.BINANCE_API_KEY },
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(8000)
     });
     // Do not reflect arbitrary upstream messages or headers to callers.
@@ -89,7 +89,7 @@ async function diagnoseBinance() {
   const checks = await Promise.all(probes.map(async ([name, url]) => {
     try {
       const response = await fetch(url, {
-        method: "GET", redirect: "error", signal: AbortSignal.timeout(6000)
+        method: "GET", redirect: "manual", signal: AbortSignal.timeout(6000)
       });
       return { name, result: response.ok ? "reachable" : "http_error", httpStatus: response.status };
     } catch (err) {
