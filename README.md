@@ -6,6 +6,7 @@ Cloudflare Worker gateway for the BTC trading project. **Paper trading remains u
 
 - `GET /health` — public, contains no private data.
 - `GET /private/status` — protected by a strong bearer token. Returns only server status; no Binance account data.
+- `GET /private/commission-rate` — authenticated **read-only** BTCUSDT USD-M futures maker/taker commission rate query. Requires `BINANCE_API_KEY` and `BINANCE_API_SECRET` Cloudflare Secrets. Never submits orders.
 - Every other path: 404. Every non-GET request: 405. No permissive CORS.
 
 ## Required Cloudflare Worker Secret
@@ -22,9 +23,20 @@ To test protection, visiting `/private/status` in an ordinary browser should ret
 
 A future authenticated client may send `Authorization: Bearer <your-token>`; do not hardcode the token in public GitHub Pages code. For browser access, build a secure sign-in flow and carefully restrict CORS/origins first.
 
+## Cloudflare secret setup (after authentication is configured)
+
+Add each as **Secret**, not Text, under Settings > Runtime variables and secrets (Production):
+
+- `BINANCE_API_KEY` — Binance key, NOT the secret key
+- `BINANCE_API_SECRET` — Binance secret key; keep private
+
+Never paste credentials into ChatGPT, README, GitHub, or public frontend code. `APP_AUTH_TOKEN` is distinct from Binance credentials. Binance API permissions for lookup can remain **Reading only** while developing; no futures trading permission is required for this lookup. Some Binance API configurations restrict IP allowlists; Cloudflare Workers egress IPs may vary. If the call fails, do not disable security protections to force a connection.
+
+The private endpoint accepts a Bearer token **in the HTTP Authorization header**. Do not put tokens in URLs or browser query strings. The GitHub Pages app has not been connected to this authentication method yet.
+
 ## Not implemented
 
-- Binance key/secret registration or signed account queries
+- Binance account balances, positions, or trading history queries
 - Futures trading permissions or real orders
 - Browser login/session flow
 
