@@ -248,7 +248,13 @@ export default {
       if (!match || !(await validToken(match[1], env.APP_AUTH_TOKEN))) {
         return json({ error: "Unauthorized" }, 401);
       }
-      if (pathname === "/private/live-snapshot") return readLiveSnapshot(env);
+      if (pathname === "/private/live-snapshot") {
+        const response=await readLiveSnapshot(env);
+        return new Response(response.body,{
+          status:response.status,
+          headers:{...Object.fromEntries(response.headers),...corsHeaders(origin)}
+        });
+      }
       if (pathname === "/private/network-check") return diagnoseBinance();
       if (pathname === "/private/commission-rate") {
         return fetchCommissionRate(env);
