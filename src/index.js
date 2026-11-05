@@ -202,6 +202,12 @@ export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
     const origin = request.headers.get("Origin") || "";
+    if (pathname === "/private/live-snapshot" && request.method === "OPTIONS") {
+      if (origin !== APP_ORIGIN) return json({error:"Forbidden"},403);
+      return new Response(null,{status:204,headers:{
+        ...corsHeaders(origin),"Access-Control-Allow-Methods":"GET, OPTIONS"
+      }});
+    }
     if (pathname === "/private/commission-with-keys" && request.method === "OPTIONS") {
       if (origin !== APP_ORIGIN) return json({error:"Forbidden"},403);
       return new Response(null,{status:204,headers:corsHeaders(origin)});
