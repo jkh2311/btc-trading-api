@@ -99,6 +99,60 @@ async function fetchCommissionRate(env, oneTimeCredentials = null, extraHeaders 
 }
 
 
+// Signed BTCUSDT USER_DATA snapshot. Read-only by construction.
+// Never return the API key, signature, signed URL or complete Binance payload.
+async function signedBinanceGet(env,path,params={}){
+  if(!env.BINANCE_API_KEY||!env.BINANCE_API_SECRET)return {error:"BINANCE_NOT_CONFIGURED",status:503};
+  const query=new URLSearchParams({...params,recvWindow:"5000",timestamp:String(Date.now())});
+  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.BINANCE_API_SECRET),
+    {name:"HMAC",hash:"SHA-256"},false,["sign"]);
+  const raw=new Uint8Array(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(query.toString())));
+  query.set("signature",Array.from(raw,b=>b.toString(16).padStart(2,"0")).join(""));
+  try{
+    const response=await fetch("https://fapi.binance.com"+path+"?"+query.toString(),{
+      method:"GET",headers:{"X-MBX-APIKEY":env.BINANCE_API_KEY},
+      redirect:"manual",signal:AbortSignal.timeout(8000)
+    });
+    if(!response.ok)return {error:"BINANCE_READ_FAILED",status:502,upstreamStatus:response.status};
+    return {data:await response.json()};
+  }catch(_){return {error:"BINANCE_UNAVAILABLE",status:502}}
+}
+async function readLiveSnapshot(env){
+  // This is intentionally not a trading route; no POST/PUT/DELETE allowed.
+  const [balance,positions,orders]=await Promise.all([
+    signedBinanceGet(env,"/fapi/v3/balance"),
+    signedBinanceGet(env,"/fapi/v3/positionRisk",{symbol:"BTCUSDT"}),
+    signedBinanceGet(env,"/fapi/v1/openOrders",{symbol:"BTCUSDT"})
+  ]);
+  for(const x of [balance,positions,orders])if(x.error)return json({
+    error:x.error,upstreamStatus:x.upstreamStatus||undefined,liveTradingEnabled:false
+  },x.status||502);
+  if(!Array.isArray(balance.data)||!Array.isArray(positions.data)||!Array.isArray(orders.data))
+    return json({error:"UNEXPECTED_BINANCE_RESPONSE",liveTradingEnabled:false},502);
+  const usdt=balance.data.find(x=>x?.asset==="USDT");
+  if(!usdt)return json({error:"USDT_BALANCE_NOT_FOUND",liveTradingEnabled:false},502);
+  const num=x=>{const v=Number(x);return Number.isFinite(v)?v:null};
+  const safePositions=positions.data.filter(x=>x?.symbol==="BTCUSDT").map(p=>({
+    symbol:"BTCUSDT",side:p.positionSide||"BOTH",quantity:num(p.positionAmt),
+    entryPrice:num(p.entryPrice),markPrice:num(p.markPrice),
+    unrealizedPnl:num(p.unRealizedProfit),leverage:num(p.leverage),
+    isolated:p.marginType==="isolated",liquidationPrice:num(p.liquidationPrice)
+  }));
+  const safeOrders=orders.data.filter(o=>o?.symbol==="BTCUSDT").slice(0,100).map(o=>({
+    id:String(o.orderId||""),clientId:String(o.clientOrderId||"").slice(0,64),
+    side:o.side,positionSide:o.positionSide||"BOTH",type:o.type,status:o.status,
+    price:num(o.price),originalQty:num(o.origQty),executedQty:num(o.executedQty),
+    remainingQty:num(o.origQty)-num(o.executedQty),time:o.time
+  }));
+  return json({
+    source:"BINANCE_USDM_FUTURES",symbol:"BTCUSDT",mode:"READ_ONLY",
+    liveTradingEnabled:false,asOf:new Date().toISOString(),
+    account:{asset:"USDT",walletBalance:num(usdt.balance),availableBalance:num(usdt.availableBalance),
+      crossWalletBalance:num(usdt.crossWalletBalance)},
+    positions:safePositions,openOrders:safeOrders
+  });
+}
+
 // Authenticated public Binance futures connectivity probe. Sends no credentials.
 async function diagnoseBinance() {
   const probes = [
@@ -175,6 +229,7 @@ export default {
       if (!match || !(await validToken(match[1], env.APP_AUTH_TOKEN))) {
         return json({ error: "Unauthorized" }, 401);
       }
+      if (pathname === "/private/live-snapshot") return readLiveSnapshot(env);
       if (pathname === "/private/network-check") return diagnoseBinance();
       if (pathname === "/private/commission-rate") {
         return fetchCommissionRate(env);
@@ -184,7 +239,7 @@ export default {
           authenticated: true,
           binanceConnected: false,
           liveTradingEnabled: false,
-          availableActions: ["status", "commission-rate", "network-check"]
+          availableActions: ["status", "commission-rate", "network-check", "live-snapshot-read-only"]
         });
       }
       return json({ error: "Not found" }, 404);
