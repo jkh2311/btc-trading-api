@@ -41,3 +41,13 @@ The private endpoint accepts a Bearer token **in the HTTP Authorization header**
 - Browser login/session flow
 
 Binance credentials must eventually be stored as Cloudflare **Secrets** only after account access, auth and session security have been reviewed. Do not turn on live trading at this stage.
+
+## 실전 전환 개발 브랜치: 읽기 전용 계좌 스냅샷 (배포 전)
+
+`feature/read-only-live-account-snapshot` 브랜치에 보호된 `GET /private/live-snapshot`을 추가했습니다. 기존 `APP_AUTH_TOKEN` Bearer 인증, Cloudflare Secrets `BINANCE_API_KEY` / `BINANCE_API_SECRET`을 사용하여 BTCUSDT USDⓈ-M 선물의 **USDT 잔고, 포지션, 현재 미체결 주문**을 읽어 옵니다. 응답은 필요한 필드만 반환하며 API 키와 서명은 반환하지 않습니다.
+
+- 다른 경로의 인증과 권한 검증을 우회하지 않습니다.
+- GET 전용이며 실전 주문 생성/수정/취소 API는 여전히 없습니다.
+- 기본 브랜치와 배포에는 아직 적용하지 않았습니다.
+- API 거래 권한을 켜거나 비밀값을 채팅/GitHub에 전달하지 마세요.
+- Cloudflare 배포 전 읽기 전용 호출, CORS, 인증, 계좌 응답 구조를 검증해야 합니다.
