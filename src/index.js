@@ -118,38 +118,57 @@ async function signedBinanceGet(env,path,params={}){
   }catch(_){return {error:"BINANCE_UNAVAILABLE",status:502}}
 }
 async function readLiveSnapshot(env){
-  // This is intentionally not a trading route; no POST/PUT/DELETE allowed.
-  const [balance,positions,orders]=await Promise.all([
+  // All requests are signed GETs. This service never places orders.
+  const [account,balances,positions,orders,fills,mode]=await Promise.all([
+    signedBinanceGet(env,"/fapi/v3/account"),
     signedBinanceGet(env,"/fapi/v3/balance"),
     signedBinanceGet(env,"/fapi/v3/positionRisk",{symbol:"BTCUSDT"}),
-    signedBinanceGet(env,"/fapi/v1/openOrders",{symbol:"BTCUSDT"})
+    signedBinanceGet(env,"/fapi/v1/openOrders",{symbol:"BTCUSDT"}),
+    signedBinanceGet(env,"/fapi/v1/userTrades",{symbol:"BTCUSDT",limit:"100"}),
+    signedBinanceGet(env,"/fapi/v1/positionSide/dual")
   ]);
-  for(const x of [balance,positions,orders])if(x.error)return json({
-    error:x.error,upstreamStatus:x.upstreamStatus||undefined,liveTradingEnabled:false
-  },x.status||502);
-  if(!Array.isArray(balance.data)||!Array.isArray(positions.data)||!Array.isArray(orders.data))
+  for(const x of [account,balances,positions,orders,fills,mode])
+    if(x.error)return json({error:x.error,upstreamStatus:x.upstreamStatus||undefined,liveTradingEnabled:false},x.status||502);
+  if(!account.data||!Array.isArray(balances.data)||!Array.isArray(positions.data)||
+     !Array.isArray(orders.data)||!Array.isArray(fills.data)||
+     typeof mode.data?.dualSidePosition!=="boolean")
     return json({error:"UNEXPECTED_BINANCE_RESPONSE",liveTradingEnabled:false},502);
-  const usdt=balance.data.find(x=>x?.asset==="USDT");
+  const usdt=balances.data.find(x=>x?.asset==="USDT");
   if(!usdt)return json({error:"USDT_BALANCE_NOT_FOUND",liveTradingEnabled:false},502);
-  const num=x=>{const v=Number(x);return Number.isFinite(v)?v:null};
-  const safePositions=positions.data.filter(x=>x?.symbol==="BTCUSDT").map(p=>({
+  const num=x=>{if(x===null||x===undefined||x==="")return null;const v=Number(x);return Number.isFinite(v)?v:null};
+  const positionsView=positions.data.filter(x=>x?.symbol==="BTCUSDT").map(p=>({
     symbol:"BTCUSDT",side:p.positionSide||"BOTH",quantity:num(p.positionAmt),
     entryPrice:num(p.entryPrice),markPrice:num(p.markPrice),
     unrealizedPnl:num(p.unRealizedProfit),leverage:num(p.leverage),
-    isolated:p.marginType==="isolated",liquidationPrice:num(p.liquidationPrice)
+    isolated:p.marginType==="isolated",liquidationPrice:num(p.liquidationPrice),
+    breakEvenPrice:num(p.breakEvenPrice),notional:num(p.notional),
+    positionInitialMargin:num(p.positionInitialMargin)
   }));
-  const safeOrders=orders.data.filter(o=>o?.symbol==="BTCUSDT").slice(0,100).map(o=>({
+  const ordersView=orders.data.filter(x=>x?.symbol==="BTCUSDT").slice(0,100).map(o=>({
     id:String(o.orderId||""),clientId:String(o.clientOrderId||"").slice(0,64),
     side:o.side,positionSide:o.positionSide||"BOTH",type:o.type,status:o.status,
     price:num(o.price),originalQty:num(o.origQty),executedQty:num(o.executedQty),
-    remainingQty:num(o.origQty)-num(o.executedQty),time:o.time
+    remainingQty:(num(o.origQty)??0)-(num(o.executedQty)??0),time:o.time
+  }));
+  const fillsView=fills.data.filter(x=>x?.symbol==="BTCUSDT").slice(-100).map(x=>({
+    id:String(x.id||""),orderId:String(x.orderId||""),side:x.side,
+    positionSide:x.positionSide||"BOTH",price:num(x.price),quantity:num(x.qty),
+    quoteQty:num(x.quoteQty),realizedPnl:num(x.realizedPnl),
+    commission:num(x.commission),commissionAsset:x.commissionAsset,time:x.time
   }));
   return json({
     source:"BINANCE_USDM_FUTURES",symbol:"BTCUSDT",mode:"READ_ONLY",
     liveTradingEnabled:false,asOf:new Date().toISOString(),
-    account:{asset:"USDT",walletBalance:num(usdt.balance),availableBalance:num(usdt.availableBalance),
-      crossWalletBalance:num(usdt.crossWalletBalance)},
-    positions:safePositions,openOrders:safeOrders
+    account:{
+      asset:"USDT",walletBalance:num(usdt.balance),availableBalance:num(usdt.availableBalance),
+      crossWalletBalance:num(usdt.crossWalletBalance),
+      totalInitialMargin:num(account.data.totalInitialMargin),
+      totalOpenOrderInitialMargin:num(account.data.totalOpenOrderInitialMargin),
+      totalPositionInitialMargin:num(account.data.totalPositionInitialMargin),
+      totalUnrealizedProfit:num(account.data.totalUnrealizedProfit)
+    },
+    hedgeMode:mode.data.dualSidePosition,
+    positions:positionsView,openOrders:ordersView,recentFills:fillsView
   });
 }
 
