@@ -99,6 +99,79 @@ async function fetchCommissionRate(env, oneTimeCredentials = null, extraHeaders 
 }
 
 
+// Signed BTCUSDT USER_DATA snapshot. Read-only by construction.
+// Never return the API key, signature, signed URL or complete Binance payload.
+async function signedBinanceGet(env,path,params={}){
+  if(!env.BINANCE_API_KEY||!env.BINANCE_API_SECRET)return {error:"BINANCE_NOT_CONFIGURED",status:503};
+  const query=new URLSearchParams({...params,recvWindow:"5000",timestamp:String(Date.now())});
+  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(env.BINANCE_API_SECRET),
+    {name:"HMAC",hash:"SHA-256"},false,["sign"]);
+  const raw=new Uint8Array(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(query.toString())));
+  query.set("signature",Array.from(raw,b=>b.toString(16).padStart(2,"0")).join(""));
+  try{
+    const response=await fetch("https://fapi.binance.com"+path+"?"+query.toString(),{
+      method:"GET",headers:{"X-MBX-APIKEY":env.BINANCE_API_KEY},
+      redirect:"manual",signal:AbortSignal.timeout(8000)
+    });
+    if(!response.ok)return {error:"BINANCE_READ_FAILED",status:502,upstreamStatus:response.status};
+    return {data:await response.json()};
+  }catch(_){return {error:"BINANCE_UNAVAILABLE",status:502}}
+}
+async function readLiveSnapshot(env){
+  // All requests are signed GETs. This service never places orders.
+  const [account,balances,positions,orders,fills,mode]=await Promise.all([
+    signedBinanceGet(env,"/fapi/v3/account"),
+    signedBinanceGet(env,"/fapi/v3/balance"),
+    signedBinanceGet(env,"/fapi/v3/positionRisk",{symbol:"BTCUSDT"}),
+    signedBinanceGet(env,"/fapi/v1/openOrders",{symbol:"BTCUSDT"}),
+    signedBinanceGet(env,"/fapi/v1/userTrades",{symbol:"BTCUSDT",limit:"100"}),
+    signedBinanceGet(env,"/fapi/v1/positionSide/dual")
+  ]);
+  for(const x of [account,balances,positions,orders,fills,mode])
+    if(x.error)return json({error:x.error,upstreamStatus:x.upstreamStatus||undefined,liveTradingEnabled:false},x.status||502);
+  if(!account.data||!Array.isArray(balances.data)||!Array.isArray(positions.data)||
+     !Array.isArray(orders.data)||!Array.isArray(fills.data)||
+     typeof mode.data?.dualSidePosition!=="boolean")
+    return json({error:"UNEXPECTED_BINANCE_RESPONSE",liveTradingEnabled:false},502);
+  const usdt=balances.data.find(x=>x?.asset==="USDT");
+  if(!usdt)return json({error:"USDT_BALANCE_NOT_FOUND",liveTradingEnabled:false},502);
+  const num=x=>{if(x===null||x===undefined||x==="")return null;const v=Number(x);return Number.isFinite(v)?v:null};
+  const positionsView=positions.data.filter(x=>x?.symbol==="BTCUSDT").map(p=>({
+    symbol:"BTCUSDT",side:p.positionSide||"BOTH",quantity:num(p.positionAmt),
+    entryPrice:num(p.entryPrice),markPrice:num(p.markPrice),
+    unrealizedPnl:num(p.unRealizedProfit),leverage:num(p.leverage),
+    isolated:p.marginType==="isolated",liquidationPrice:num(p.liquidationPrice),
+    breakEvenPrice:num(p.breakEvenPrice),notional:num(p.notional),
+    positionInitialMargin:num(p.positionInitialMargin)
+  }));
+  const ordersView=orders.data.filter(x=>x?.symbol==="BTCUSDT").slice(0,100).map(o=>({
+    id:String(o.orderId||""),clientId:String(o.clientOrderId||"").slice(0,64),
+    side:o.side,positionSide:o.positionSide||"BOTH",type:o.type,status:o.status,
+    price:num(o.price),originalQty:num(o.origQty),executedQty:num(o.executedQty),
+    remainingQty:(num(o.origQty)??0)-(num(o.executedQty)??0),time:o.time
+  }));
+  const fillsView=fills.data.filter(x=>x?.symbol==="BTCUSDT").slice(-100).map(x=>({
+    id:String(x.id||""),orderId:String(x.orderId||""),side:x.side,
+    positionSide:x.positionSide||"BOTH",price:num(x.price),quantity:num(x.qty),
+    quoteQty:num(x.quoteQty),realizedPnl:num(x.realizedPnl),
+    commission:num(x.commission),commissionAsset:x.commissionAsset,time:x.time
+  }));
+  return json({
+    source:"BINANCE_USDM_FUTURES",symbol:"BTCUSDT",mode:"READ_ONLY",
+    liveTradingEnabled:false,asOf:new Date().toISOString(),
+    account:{
+      asset:"USDT",walletBalance:num(usdt.balance),availableBalance:num(usdt.availableBalance),
+      crossWalletBalance:num(usdt.crossWalletBalance),
+      totalInitialMargin:num(account.data.totalInitialMargin),
+      totalOpenOrderInitialMargin:num(account.data.totalOpenOrderInitialMargin),
+      totalPositionInitialMargin:num(account.data.totalPositionInitialMargin),
+      totalUnrealizedProfit:num(account.data.totalUnrealizedProfit)
+    },
+    hedgeMode:mode.data.dualSidePosition,
+    positions:positionsView,openOrders:ordersView,recentFills:fillsView
+  });
+}
+
 // Authenticated public Binance futures connectivity probe. Sends no credentials.
 async function diagnoseBinance() {
   const probes = [
@@ -129,6 +202,12 @@ export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
     const origin = request.headers.get("Origin") || "";
+    if (pathname === "/private/live-snapshot" && request.method === "OPTIONS") {
+      if (origin !== APP_ORIGIN) return json({error:"Forbidden"},403);
+      return new Response(null,{status:204,headers:{
+        ...corsHeaders(origin),"Access-Control-Allow-Methods":"GET, OPTIONS"
+      }});
+    }
     if (pathname === "/private/commission-with-keys" && request.method === "OPTIONS") {
       if (origin !== APP_ORIGIN) return json({error:"Forbidden"},403);
       return new Response(null,{status:204,headers:corsHeaders(origin)});
@@ -175,6 +254,13 @@ export default {
       if (!match || !(await validToken(match[1], env.APP_AUTH_TOKEN))) {
         return json({ error: "Unauthorized" }, 401);
       }
+      if (pathname === "/private/live-snapshot") {
+        const response=await readLiveSnapshot(env);
+        return new Response(response.body,{
+          status:response.status,
+          headers:{...Object.fromEntries(response.headers),...corsHeaders(origin)}
+        });
+      }
       if (pathname === "/private/network-check") return diagnoseBinance();
       if (pathname === "/private/commission-rate") {
         return fetchCommissionRate(env);
@@ -184,7 +270,7 @@ export default {
           authenticated: true,
           binanceConnected: false,
           liveTradingEnabled: false,
-          availableActions: ["status", "commission-rate", "network-check"]
+          availableActions: ["status", "commission-rate", "network-check", "live-snapshot-read-only"]
         });
       }
       return json({ error: "Not found" }, 404);
